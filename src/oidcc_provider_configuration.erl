@@ -518,7 +518,7 @@ decode_configuration(Configuration0, Opts) ->
             token_endpoint_auth_methods_supported =
                 TokenEndpointAuthMethodsSupported,
             token_endpoint_auth_signing_alg_values_supported =
-                TokenEndpointAuthSigningAlgValuesSupported,
+                maybe_fallback(TokenEndpointAuthSigningAlgValuesSupported),
             display_values_supported = DisplayValuesSupported,
             claim_types_supported = ClaimTypesSupported,
             claims_supported = ClaimsSupported,
@@ -555,7 +555,7 @@ decode_configuration(Configuration0, Opts) ->
                 AuthorizationEncryptionEncValuesSupported,
             authorization_response_iss_parameter_supported =
                 AuthorizationResponseIssParameterSupported,
-            dpop_signing_alg_values_supported = DpopSigningAlgValuesSupported,
+            dpop_signing_alg_values_supported = maybe_fallback(DpopSigningAlgValuesSupported),
             require_signed_request_object = RequireSignedRequestObject,
             mtls_endpoint_aliases = MtlsEndpointAliases,
             tls_client_certificate_bound_access_tokens = TlsClientCertificateBoundAccessTokens,
@@ -684,3 +684,13 @@ url_join(RefURI, BaseURI) ->
         <<"/">> -> uri_string:resolve(RefURI, BaseURI);
         _ -> uri_string:resolve(RefURI, [BaseURI, "/"])
     end.
+
+maybe_fallback(undefined) ->
+    case application:get_env(oidcc, provider, generic) of
+        okta ->
+            application:get_env(oidcc, fallback_methods, undefined);
+        _ ->
+            undefined
+    end;
+maybe_fallback(Value) ->
+    Value.
