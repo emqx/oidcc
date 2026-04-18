@@ -159,15 +159,19 @@ redirect_params(#oidcc_client_context{client_id = ClientId} = ClientContext, Opt
         ),
         QueryParams7 = maybe_append_dpop_jkt(QueryParams6, ClientContext),
         {ok, QueryParams8} ?= attempt_request_object(QueryParams7, ClientContext),
-        QueryParams = case application:get_env(oidcc, provider, generic) of
-                          okta ->
-                              lists:filter(fun({<<"request">>, _}) -> true;
-                                              (_) -> false
-                                           end,
-                                           QueryParams8);
-                          _ ->
-                              QueryParams8
-                      end,
+        QueryParams =
+            case application:get_env(oidcc, provider, generic) of
+                okta ->
+                    lists:filter(
+                        fun
+                            ({<<"request">>, _}) -> true;
+                            (_) -> false
+                        end,
+                        QueryParams8
+                    );
+                _ ->
+                    QueryParams8
+            end,
         attempt_par(QueryParams, ClientContext, Opts)
     end.
 

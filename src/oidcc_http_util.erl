@@ -161,10 +161,29 @@ extract_successful_response({{_HttpVersion, StatusCode, _HttpStatusName}, Header
 -spec fetch_content_type(Headers) -> json | jwt | unknown when Headers :: [http_header()].
 fetch_content_type(Headers) ->
     case proplists:lookup("content-type", Headers) of
-        {"content-type", "application/json" ++ _Rest} ->
-            json;
-        {"content-type", "application/jwt" ++ _Rest} ->
-            jwt;
+        {"content-type", ContentType} ->
+            case is_json_content_type(ContentType) of
+                true ->
+                    json;
+                false ->
+                    case ContentType of
+                        "application/jwt" ++ _Rest ->
+                            jwt;
+                        _ ->
+                            unknown
+                    end
+            end;
         _Other ->
             unknown
+    end.
+
+is_json_content_type(ContentType) ->
+    [MediaType | _] = string:tokens(string:lowercase(ContentType), "; "),
+    case MediaType of
+        "application/json" ->
+            true;
+        "application/" ++ _Rest ->
+            lists:suffix("+json", MediaType);
+        _ ->
+            false
     end.
