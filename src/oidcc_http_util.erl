@@ -8,6 +8,7 @@
 
 -export([basic_auth_header/2]).
 -export([bearer_auth_header/1]).
+-export([headers_to_cache_deadline/2]).
 -export([request/4]).
 
 -export_type([
@@ -187,3 +188,57 @@ is_json_content_type(ContentType) ->
         _ ->
             false
     end.
+
+-spec headers_to_cache_deadline(Headers, DefaultExpiry) -> pos_integer() when
+    Headers :: [{Header :: binary(), Value :: binary()}], DefaultExpiry :: non_neg_integer().
+headers_to_cache_deadline(Headers, DefaultExpiry) ->
+    case proplists:lookup("cache-control", Headers) of
+        {"cache-control", Cache} ->
+            try
+                cache_deadline(Cache, DefaultExpiry)
+            catch
+                _:_ ->
+                    DefaultExpiry
+            end;
+        none ->
+            DefaultExpiry
+    end.
+
+-spec cache_deadline(Cache :: iodata(), Fallback :: pos_integer()) -> pos_integer().
+cache_deadline(Cache, Fallback) ->
+    %% RFC 7234 §5.2: cache-control directive names are case-insensitive
+    %% (`Max-Age', `MAX-AGE', and `max-age' are all valid). Lowercase the
+    %% whole header before splitting so the `<<"max-age">>' match below
+    %% catches every spelling.
+    Lower = string:lowercase(iolist_to_binary(Cache)),
+    Entries = binary:split(Lower, [<<",">>, <<"=">>, <<" ">>], [global, trim_all]),
+    clamp_expiry(extract_max_age(Entries, Fallback), Fallback).
+
+%% Walk the cache-control tokens looking for `max-age=<N>' and return N as
+%% milliseconds. If the value is missing, zero, or non-numeric, return the
+%% caller's fallback.
+-spec extract_max_age([binary()], pos_integer()) -> pos_integer().
+extract_max_age([<<"max-age">>, Value | _Rest], Fallback) ->
+    try binary_to_integer(Value) of
+        N when N > 0 ->
+            erlang:convert_time_unit(N, second, millisecond);
+        _ ->
+            Fallback
+    catch
+        _:_ ->
+            Fallback
+    end;
+extract_max_age([_ | Rest], Fallback) ->
+    extract_max_age(Rest, Fallback);
+extract_max_age([], Fallback) ->
+    Fallback.
+
+%% `erlang:send_after/3' accepts at most 16#FFFFFFFF ms (~49.7 days). Clamp the
+%% cache-derived expiry so an over-eager provider can never trigger badarg.
+-spec clamp_expiry(term(), pos_integer()) -> pos_integer().
+clamp_expiry(Value, _Fallback) when is_integer(Value), Value > 0, Value =< 16#FFFFFFFF ->
+    Value;
+clamp_expiry(Value, _Fallback) when is_integer(Value), Value > 16#FFFFFFFF ->
+    16#FFFFFFFF;
+clamp_expiry(_Value, Fallback) ->
+    Fallback.
