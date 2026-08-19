@@ -130,13 +130,17 @@ from_configuration_worker(ProviderName, ClientId, ClientSecret) ->
         ClientId :: binary(),
         ClientSecret :: unauthenticated,
         Opts :: unauthenticated_opts().
-from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts) when is_pid(ProviderName) ->
-    do_from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts);
+from_configuration_worker(Pid, ClientId, ClientSecret, Opts) when is_pid(Pid) ->
+    do_from_configuration_worker(Pid, ClientId, ClientSecret, Opts);
 from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts) ->
     case erlang:whereis(ProviderName) of
         undefined ->
             {error, provider_not_ready};
         _ ->
+            %% Discard the Pid and keep calling with the atom name: only the
+            %% atom ref hits the ETS fast path in the worker (the table is
+            %% named after the registered name). A pid would fall back to a
+            %% blocking gen_server call.
             do_from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts)
     end.
 
