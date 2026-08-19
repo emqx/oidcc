@@ -141,18 +141,25 @@ from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts) ->
     end.
 
 do_from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts) ->
-    maybe
-        #oidcc_provider_configuration{} =
-            ProviderConfiguration ?=
-                oidcc_provider_configuration_worker:get_provider_configuration(
-                    ProviderName
-                ),
-        #jose_jwk{} =
-            Jwks ?=
-                oidcc_provider_configuration_worker:get_jwks(ProviderName),
-        {ok, from_manual(ProviderConfiguration, Jwks, ClientId, ClientSecret, Opts)}
-    else
-        undefined -> {error, provider_not_ready}
+    try
+        maybe
+            #oidcc_provider_configuration{} =
+                ProviderConfiguration ?=
+                    oidcc_provider_configuration_worker:get_provider_configuration(
+                        ProviderName
+                    ),
+            #jose_jwk{} =
+                Jwks ?=
+                    oidcc_provider_configuration_worker:get_jwks(ProviderName),
+            {ok, from_manual(ProviderConfiguration, Jwks, ClientId, ClientSecret, Opts)}
+        else
+            undefined -> {error, provider_not_ready}
+        end
+    catch
+        exit:{timeout, {gen_server, call, _}} ->
+            {error, provider_not_ready};
+        exit:{noproc, {gen_server, call, _}} ->
+            {error, provider_not_ready}
     end.
 
 %% @doc Create Client Context manually
