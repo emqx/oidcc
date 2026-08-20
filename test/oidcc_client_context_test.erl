@@ -18,6 +18,115 @@ provider_not_running_test() ->
     ),
     ok.
 
+from_configuration_worker_registered_name_uses_ets_test() ->
+    WorkerName = from_configuration_worker_registered_name_uses_ets_test,
+    try
+        WorkerPid = start_mocked_worker(WorkerName),
+
+        %% A suspended worker cannot answer gen_server calls; the registered-name
+        %% API must use the ETS fast path and return immediately.
+        ok = sys:suspend(WorkerPid),
+
+        {ElapsedUs, Result} = timer:tc(fun() ->
+            oidcc_client_context:from_configuration_worker(
+                WorkerName,
+                <<"client_id">>,
+                <<"client_secret">>
+            )
+        end),
+
+        ?assertMatch({ok, #oidcc_client_context{}}, Result),
+        ?assert(ElapsedUs < 1_000_000)
+    after
+        stop_worker(WorkerName),
+        meck:unload(httpc)
+    end.
+
+%% Regression: a busy worker with an empty ETS table (e.g. the first
+%% configuration load still in flight) used to make the fallback
+%% gen_server:call time out and crash the caller. The timeout is now caught
+%% and mapped to provider_not_ready.
+from_configuration_worker_timeout_returns_provider_not_ready_test_() ->
+    %% The fallback gen_server:call takes the full 5s to time out; give the
+    %% eunit runner more headroom than its default 5s per-test timeout.
+    {timeout, 15, fun from_configuration_worker_timeout_returns_provider_not_ready/0}.
+
+from_configuration_worker_timeout_returns_provider_not_ready() ->
+    WorkerName = from_configuration_worker_timeout_returns_provider_not_ready_test,
+    ok = meck:new(httpc, [no_link]),
+    DiscoveryBody = jsx:encode(#{
+        issuer => <<"https://example.com">>,
+        jwks_uri => <<"https://example.com/keys">>,
+        authorization_endpoint => <<"https://example.com/authorize">>,
+        scopes_supported => [<<"openid">>],
+        response_types_supported => [<<"code">>],
+        subject_types_supported => [<<"public">>],
+        id_token_signing_alg_values_supported => [<<"RS256">>]
+    }),
+    HttpFun =
+        fun
+            (
+                get,
+                {"https://example.com/.well-known/openid-configuration", []},
+                _HttpOpts,
+                _Opts,
+                _Profile
+            ) ->
+                %% Hold the first load in flight so the worker stays busy with
+                %% an empty ETS table, like the race window at startup.
+                receive
+                    continue_discovery -> ok
+                end,
+                {ok, {
+                    {"HTTP/1.1", 200, "OK"},
+                    [{"content-type", "application/json"}],
+                    DiscoveryBody
+                }};
+            (
+                get,
+                {<<"https://example.com/keys">>, []},
+                _HttpOpts,
+                _Opts,
+                _Profile
+            ) ->
+                {ok, {
+                    {"HTTP/1.1", 200, "OK"},
+                    [{"content-type", "application/json"}],
+                    jsx:encode(#{keys => []})
+                }}
+        end,
+    ok = meck:expect(httpc, request, HttpFun),
+
+    try
+        {ok, WorkerPid} =
+            oidcc_provider_configuration_worker:start_link(#{
+                issuer => <<"https://example.com">>,
+                name => {local, WorkerName}
+            }),
+
+        %% ETS table exists (created in init) but is empty; the worker is
+        %% blocked in the mocked discovery request. The fallback
+        %% gen_server:call times out after 5s and must be caught.
+        ?assertMatch(
+            {error, provider_not_ready},
+            oidcc_client_context:from_configuration_worker(
+                WorkerName,
+                <<"client_id">>,
+                <<"client_secret">>
+            )
+        )
+    after
+        MaybePid = whereis(WorkerName),
+        case MaybePid of
+            undefined ->
+                ok;
+            _ ->
+                MaybePid ! continue_discovery
+        end,
+        stop_worker(WorkerName),
+        meck:unload(httpc)
+    end.
+
 apply_profiles_fapi2_security_profile_test() ->
     ClientContext0 = client_context_fixture(),
     Opts0 = #{
@@ -277,3 +386,85 @@ client_context_fixture() ->
     ClientSecret = <<"client_secret">>,
 
     oidcc_client_context:from_manual(Configuration, Jwks, ClientId, ClientSecret).
+
+stop_worker(WorkerName) ->
+    case erlang:whereis(WorkerName) of
+        undefined ->
+            ok;
+        WorkerPid ->
+            gen_server:stop(WorkerPid)
+    end.
+
+start_mocked_worker(WorkerName) ->
+    ok = meck:new(httpc, [no_link]),
+    DiscoveryBody = jsx:encode(#{
+        issuer => <<"https://example.com">>,
+        jwks_uri => <<"https://example.com/keys">>,
+        authorization_endpoint => <<"https://example.com/authorize">>,
+        scopes_supported => [<<"openid">>],
+        response_types_supported => [<<"code">>],
+        subject_types_supported => [<<"public">>],
+        id_token_signing_alg_values_supported => [<<"RS256">>]
+    }),
+    HttpFun =
+        fun
+            (
+                get,
+                {"https://example.com/.well-known/openid-configuration", []},
+                _HttpOpts,
+                _Opts,
+                _Profile
+            ) ->
+                {ok, {
+                    {"HTTP/1.1", 200, "OK"},
+                    [{"content-type", "application/json"}],
+                    DiscoveryBody
+                }};
+            (
+                get,
+                {<<"https://example.com/keys">>, []},
+                _HttpOpts,
+                _Opts,
+                _Profile
+            ) ->
+                {ok, {
+                    {"HTTP/1.1", 200, "OK"},
+                    [{"content-type", "application/json"}],
+                    jsx:encode(#{keys => []})
+                }}
+        end,
+    ok = meck:expect(httpc, request, HttpFun),
+
+    {ok, WorkerPid} =
+        oidcc_provider_configuration_worker:start_link(#{
+            issuer => <<"https://example.com">>,
+            name => {local, WorkerName}
+        }),
+
+    ?assertMatch(
+        #oidcc_provider_configuration{issuer = <<"https://example.com">>},
+        wait_until(fun() ->
+            oidcc_provider_configuration_worker:get_provider_configuration(WorkerName)
+        end)
+    ),
+    ?assertMatch(
+        #jose_jwk{keys = {jose_jwk_set, []}},
+        wait_until(fun() ->
+            oidcc_provider_configuration_worker:get_jwks(WorkerName)
+        end)
+    ),
+    WorkerPid.
+
+wait_until(Fun) ->
+    wait_until(Fun, 20).
+
+wait_until(Fun, 0) ->
+    Fun();
+wait_until(Fun, Retries) ->
+    case Fun() of
+        undefined ->
+            timer:sleep(50),
+            wait_until(Fun, Retries - 1);
+        Value ->
+            Value
+    end.

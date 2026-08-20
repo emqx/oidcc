@@ -130,29 +130,40 @@ from_configuration_worker(ProviderName, ClientId, ClientSecret) ->
         ClientId :: binary(),
         ClientSecret :: unauthenticated,
         Opts :: unauthenticated_opts().
-from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts) when is_pid(ProviderName) ->
-    maybe
-        #oidcc_provider_configuration{} =
-            ProviderConfiguration ?=
-                oidcc_provider_configuration_worker:get_provider_configuration(ProviderName),
-        #jose_jwk{} = Jwks ?= oidcc_provider_configuration_worker:get_jwks(ProviderName),
-        {ok,
-            from_manual(
-                ProviderConfiguration,
-                Jwks,
-                ClientId,
-                ClientSecret,
-                Opts
-            )}
-    else
-        undefined -> {error, provider_not_ready}
-    end;
+from_configuration_worker(Pid, ClientId, ClientSecret, Opts) when is_pid(Pid) ->
+    do_from_configuration_worker(Pid, ClientId, ClientSecret, Opts);
 from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts) ->
     case erlang:whereis(ProviderName) of
         undefined ->
             {error, provider_not_ready};
-        Pid ->
-            from_configuration_worker(Pid, ClientId, ClientSecret, Opts)
+        _ ->
+            %% Discard the Pid and keep calling with the atom name: only the
+            %% atom ref hits the ETS fast path in the worker (the table is
+            %% named after the registered name). A pid would fall back to a
+            %% blocking gen_server call.
+            do_from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts)
+    end.
+
+do_from_configuration_worker(ProviderName, ClientId, ClientSecret, Opts) ->
+    try
+        maybe
+            #oidcc_provider_configuration{} =
+                ProviderConfiguration ?=
+                    oidcc_provider_configuration_worker:get_provider_configuration(
+                        ProviderName
+                    ),
+            #jose_jwk{} =
+                Jwks ?=
+                    oidcc_provider_configuration_worker:get_jwks(ProviderName),
+            {ok, from_manual(ProviderConfiguration, Jwks, ClientId, ClientSecret, Opts)}
+        else
+            undefined -> {error, provider_not_ready}
+        end
+    catch
+        exit:{timeout, {gen_server, call, _}} ->
+            {error, provider_not_ready};
+        exit:{noproc, {gen_server, call, _}} ->
+            {error, provider_not_ready}
     end.
 
 %% @doc Create Client Context manually
